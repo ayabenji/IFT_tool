@@ -1,0 +1,169 @@
+# Quelle feuille + où est la ligne d’entêtes du template
+sheet: "IRS - INF – XCCY"        
+header_row: 6         
+
+# Comment cibler les colonnes du template : "header" (libellé) ou "letter" (A, B, C…)
+target_mode: "header" 
+
+# Variables de base (pour les formules)
+variables:
+  notional_leg1 :   { source_letter: "AX" }   # Notional Leg1
+  notional_leg2 :  { source_letter: "BP" }  # Notional Leg2
+  dirtyvalue_leg1:   { source_letter: "DL" }
+  cleanvalue_leg1:   { source_letter: "DM" }
+  accrued_leg1:   { source_letter: "DN" }
+  dirtyvalue_leg2:   { source_letter: "DS" }
+  cleanvalue_leg2:   { source_letter: "DT" }
+  accrued_leg2:   { source_letter: "DU" }
+  dirtyvalue_tot:   { source_letter: "DA" }
+  cleanvalue_tot:   { source_letter: "DB" }
+  accrued_tot:   { source_letter: "DC" }
+
+# Mappage direct (copie 1→1 de colonnes)
+columns:
+  # Identité
+  - target: "Code DI"      
+    source: "Custom Attribute5 Value"
+  - target: "Classif DI"
+    source: "Class"
+  - target: "Class"
+    source: "Class"
+  - target: "External Id"
+    source: "External Id"
+  - target: "Counterparty"
+    source: "Counterparty"
+
+  # Leg 1 (champs bruts)
+  - target: "Leg Type"        
+    target_occurrence: 1      
+    source_letter: "AR"
+
+  - target: "Pay/Rec"        
+    target_occurrence: 1      
+    source_letter: "AS"
+
+  - target: "Index/Fixed Rate"        
+    target_occurrence: 1      
+    source_letter: "AT"
+
+  - target: "Spread (bp)"        
+    target_occurrence: 1      
+    source_letter: "AU"
+
+  - target: "Start Date"        
+    target_occurrence: 1      
+    source_letter: "AV"
+
+  - target: "End Date"        
+    target_occurrence: 1      
+    source_letter: "AW"
+
+  - target: "Notional"        
+    target_occurrence: 1      
+    source_letter: "AX"
+  
+  - target: "Dirty Value"        
+    target_occurrence: 1      
+    source_letter: "DL"
+
+  - target: "Clean Value"        
+    target_occurrence: 1      
+    source_letter: "DM"
+
+  - target: "Accrued Interest"        
+    target_occurrence: 1      
+    source_letter: "DN"
+
+
+  # Leg 2 (champs bruts)
+  - target: "Leg Type"        
+    target_occurrence: 2    
+    source_letter: "BI"
+
+  - target: "Pay/Rec"        
+    target_occurrence: 2      
+    source_letter: "BJ"
+
+  - target: "Index/Fixed Rate"        
+    target_occurrence: 2      
+    source_letter: "BK"
+
+  - target: "Spread (bp)"        
+    target_occurrence: 2      
+    source_letter: "BL"
+
+  - target: "Start Date"        
+    target_occurrence: 2      
+    source_letter: "BM"
+
+  - target: "End Date"        
+    target_occurrence: 2      
+    source_letter: "BN"
+
+  - target: "Currency"        
+    source: "Currency"
+    
+
+  - target: "Notional"        
+    target_occurrence: 2      
+    source_letter: "BP"
+  
+  - target: "Dirty Value"        
+    target_occurrence: 2      
+    source_letter: "DS"
+
+  - target: "Clean Value"        
+    target_occurrence: 2      
+    source_letter: "DT"
+
+  - target: "Accrued Interest"        
+    target_occurrence: 2      
+    source_letter: "DU"
+
+  # Leg 1 + Leg 2 (champs bruts)
+  - target: "Dirty Value"        
+    target_occurrence: 3     
+    source_letter: "DA"
+
+  - target: "Clean Value"        
+    target_occurrence: 3      
+    source_letter: "DB"
+
+  - target: "Accrued Interest"        
+    target_occurrence: 3      
+    source_letter: "DC"
+
+# Colonnes calculées (avec tes règles exactes)
+computed:
+  - target: "Dirty Value (%)"
+    target_occurrence: 1  
+    expr: "dirtyvalue_leg1 / notional_leg1"
+  - target: "Clean Value (%)"   
+    target_occurrence: 1  
+    expr: "cleanvalue_leg1 / notional_leg1"
+  - target: "Accrued Interest (%)" 
+    target_occurrence: 1  
+    expr: "accrued_leg1 / notional_leg1"
+
+  # LEG2 :
+  - target: "Dirty Value (%)"
+    target_occurrence: 2  
+    expr: "dirtyvalue_leg2 / notional_leg2"
+  - target: "Clean Value (%)"   
+    target_occurrence: 2
+    expr: "cleanvalue_leg2 / notional_leg2"
+  - target: "Accrued Interest (%)" 
+    target_occurrence: 2  
+    expr: "accrued_leg2 / notional_leg2"
+
+
+  # LEG1+2 : 
+  - target: "Dirty Value (%)"
+    target_occurrence: 3  
+    expr: "dirtyvalue_tot / notional_leg1"
+  - target: "Clean Value (%)"   
+    target_occurrence: 3
+    expr: "cleanvalue_tot / notional_leg1"
+  - target: "Accrued Interest (%)" 
+    target_occurrence: 3  
+    expr: "accrued_tot / notional_leg1"

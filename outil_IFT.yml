@@ -1,0 +1,19 @@
+name: env_outil_IFT
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  #data & Excel
+  - pandas
+  - numpy 
+  - openpyxl
+  - holidays 
+  - xlrd
+
+  #visu
+  - plotly
+  - pip:
+    - streamlit
+    - holidays
+    - yml
