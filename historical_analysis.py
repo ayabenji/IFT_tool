@@ -4,6 +4,7 @@ import re
 from datetime import date
 from pathlib import Path
 from typing import Iterable
+from dataclasses import dataclass
 
 import pandas as pd
 import streamlit as st
@@ -19,6 +20,53 @@ ANALYSIS_SHEET = "IRS - INF – XCCY"
 ANALYSIS_HEADER_ROW = 6
 ANALYSIS_DIRTY_LETTER = "AN"
 
+def _norm_aliases(*labels: str) -> set[str]:
+    return {_norm(label) for label in labels}
+
+
+@dataclass(frozen=True)
+class MtMSummaryItem:
+    label: str
+    categories: tuple[str, ...]
+    bullet: str
+    needs_reason: bool
+    fallback_aliases: tuple[str, ...] = ()
+
+
+CATEGORY_ALIASES: dict[str, set[str]] = {
+    "IR_SWAP": _norm_aliases("IR Swap", "IR - Swap", "CMS Swap"),
+    "ASWI": _norm_aliases("ASWI", "IR ASWI", "Real Rate Swap"),
+    "XCCY": _norm_aliases("XCCY", "IR XCCY", "Cross Currency Swap"),
+}
+
+
+MTM_SUMMARY_ITEMS: tuple[MtMSummaryItem, ...] = (
+    MtMSummaryItem(
+        label="IR – ASWI – XCCY",
+        categories=("IR_SWAP", "ASWI", "XCCY"),
+        bullet="-  ",
+        needs_reason=False,
+        fallback_aliases=tuple(sorted(_norm_aliases("IR – ASWI – XCCY", "IR - ASWI - XCCY", "IR-ASWI-XCCY")))),
+    MtMSummaryItem(
+        label="IR Swap",
+        categories=("IR_SWAP",),
+        bullet="- ",
+        needs_reason=True,
+    ),
+    MtMSummaryItem(
+        label="ASWI",
+        categories=("ASWI",),
+        bullet="- ",
+        needs_reason=True,
+    ),
+        MtMSummaryItem(
+        label="XCCY",
+        categories=("XCCY",),
+        bullet="o ",
+        needs_reason=True,
+    )
+
+    )
 
 def _extract_date_from_name(name: str) -> date | None:
     match = DATE_IN_NAME.search(name)
@@ -198,6 +246,85 @@ def build_comparison_dataframe(
         df = df.sort_values("Écart", key=lambda s: s.abs(), ascending=False)
     return df
 
+def _prepare_norm_totals(totals: dict[str, float]) -> dict[str, float]:
+    return {_norm(key): value for key, value in totals.items()}
+
+
+def _lookup_alias_total(
+    norm_totals: dict[str, float], aliases: Iterable[str]
+) -> float | None:
+    for alias in aliases:
+        if alias in norm_totals:
+            return norm_totals[alias]
+    return None
+
+def _resolve_summary_value(
+    norm_totals: dict[str, float], item: MtMSummaryItem
+) -> float | None:
+    total = 0.0
+    found = False
+    for category in item.categories:
+        aliases = CATEGORY_ALIASES.get(category)
+        if not aliases:
+            continue
+        category_value = _lookup_alias_total(norm_totals, aliases)
+        if category_value is None:
+            continue
+        total += category_value
+        found = True
+    if found:
+        return total
+    if item.fallback_aliases:
+        return _lookup_alias_total(norm_totals, item.fallback_aliases)
+    return None
+
+def _format_mtm_value(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    scaled = value
+    if abs(value) >= 1e4:
+        scaled = value / 1_000_000
+    sign = "- " if scaled < 0 else ""
+    body = f"{abs(scaled):,.1f}".replace(",", " ")
+    return f"{sign}{body}" if sign else body
+
+
+def build_mtm_summary(
+    current_totals: dict[str, float],
+    previous_totals: dict[str, float],
+    current_date: date | None,
+    previous_date: date | None,
+) -> str | None:
+    norm_current = _prepare_norm_totals(current_totals)
+    norm_previous = _prepare_norm_totals(previous_totals)
+    lines: list[str] = ["Bonjour,", ""]
+    has_content = False
+    date_str = current_date.strftime("%d/%m/%Y") if current_date else ""
+    prev_date_str = previous_date.strftime("%d/%m/%Y") if previous_date else ""
+    
+    lines.append(f"Voici le fichier des IFTs au {date_str}  :\n")
+    lines.append("I. Point MtM :\n")
+    for item in MTM_SUMMARY_ITEMS:
+        cur_val = _resolve_summary_value(norm_current, item)
+        prev_val = _resolve_summary_value(norm_previous, item)
+        if cur_val is None and prev_val is None:
+            continue
+        has_content = True
+        cur_txt = _format_mtm_value(cur_val)
+        prev_txt = _format_mtm_value(prev_val)
+        suffix = ""
+        if date_str:
+            suffix = f" MEUR au {prev_date_str} \n"
+        else:
+            suffix = " MEUR"
+
+        lines.append(f"{item.bullet}{item.label} : {cur_txt} vs {prev_txt}{suffix}")
+        if item.needs_reason:
+            lines.append("-> Dégradation/Amélioration du MTM en raison (à remplir)")
+        lines.append("")
+    if not has_content:
+        return None
+    return "\n".join(lines).strip()
 
 def render_analysis_tab(
     base_out: Path,
@@ -270,12 +397,17 @@ def render_analysis_tab(
 
             st.dataframe(df_compare)
 
-            csv_bytes = df_compare.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "⬇️ Exporter la comparaison (CSV)",
-                data=csv_bytes,
-                file_name="comparaison_dirty_classif.csv",
-                mime="text/csv",
+
+            current_file_date = _extract_date_from_name(current_path.name)
+            previous_file_date = _extract_date_from_name(previous_path.name)
+            summary_text = build_mtm_summary(
+                current_totals,
+                previous_totals,
+                current_file_date or ifts_date,
+                previous_file_date or current_file_date or ifts_date,
             )
+            if summary_text:
+                st.markdown(summary_text)
+
         except Exception as exc:
             st.exception(exc)
