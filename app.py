@@ -10,7 +10,12 @@ from excel_read import read_xls_smart, read_xls_with_positions, label_duplicate_
 from perimeter import build_perimeter
 from yaml_apply import load_cfg, preview_yaml_rows, integrate_yaml_to_template
 from mail_outlook import build_ifts_filename, export_xlsx_copy, prepare_outlook_draft, prepare_trioptima_request_mail, prepare_collateral_report_request_mail
-
+from sensis_import import (
+    locate_sensis_file,
+    load_sensis_table,
+    apply_sensis_to_workbook,
+    expected_sensis_name,
+)
 # --- App config ---
 st.set_page_config(page_title="IFT Downloader", page_icon="📦", layout="centered")
 st.title("📦 IFT Downloader & Extractor (refactor v1)")
@@ -199,6 +204,47 @@ if do_preview_yaml or do_integrate_yaml:
 # Ce bloc est *en dehors* du if do_preview_yaml/do_integrate_yaml, donc il reste
 # visible après un rerun quand on clique sur un bouton.
 if "out_xlsm" in st.session_state:
+    st.divider()
+    st.subheader("Étape 2.8 — Importer Sensis Bloomberg")
+
+    expected_file = expected_sensis_name(st.session_state.get("ifts_date", ifts_date))
+    st.caption(f"Fichier attendu dans le dossier prod : `{expected_file}`")
+
+    if st.button("📊 Importer les données Sensis", key="import_sensis_btn"):
+        try:
+            out_xlsm_path = Path(st.session_state["out_xlsm"])
+            sensis_dt = st.session_state.get("ifts_date", ifts_date)
+            sensis_path = locate_sensis_file(dest_dir, sensis_dt)
+            st.write(f"Fichier Sensis utilisé : **{sensis_path.name}**")
+            sensis_table = load_sensis_table(sensis_path)
+            updated, missing, rows_preview = apply_sensis_to_workbook(out_xlsm_path, sensis_table)
+            st.success(f"{updated} ligne(s) mise(s) à jour dans le template.")
+            if rows_preview:
+                df_preview = pd.DataFrame(rows_preview)
+                st.dataframe(df_preview)
+            if missing:
+                preview = ", ".join(missing[:10])
+                if len(missing) > 10:
+                    preview += " …"
+                st.warning(f"Codes DI absents du Sensis : {preview}")
+            mime = (
+                "application/vnd.ms-excel.sheet.macroEnabled.12"
+                if out_xlsm_path.suffix.lower() == ".xlsm"
+                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            with open(out_xlsm_path, "rb") as f:
+                st.download_button(
+                    label="⬇️ Télécharger le fichier mis à jour (Sensis)",
+                    data=f.read(),
+                    file_name=out_xlsm_path.name,
+                    mime=mime,
+                    key="download_sensis_updated",
+                )
+        except FileNotFoundError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.exception(e)
+
     st.divider()
     st.subheader("Étape 3 — Préparer l'email Outlook")
 
