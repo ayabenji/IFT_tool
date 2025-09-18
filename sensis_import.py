@@ -38,34 +38,21 @@ class SensisEntry:
         return sum(vals)
 
 
-def expected_sensis_name(ifts_date: date, suffix: str = "xlsx") -> str:
-    return f"Sensis IFTTool_{ifts_date:%d%m%Y}.{suffix.lower()}"
+
 
 def expected_sensis_ir_prefix(ifts_date: date) -> str:
-    return f"sensis_IR_{ifts_date:%m%d%Y}"
+    return f"sensis_IR_*"
 
 
 def locate_sensis_file(dest_dir: Path, ifts_date: date) -> Path:
-    candidates = [
-        dest_dir / expected_sensis_name(ifts_date, "xlsx"),
-        dest_dir / expected_sensis_name(ifts_date, "xlsm"),
-        dest_dir / expected_sensis_name(ifts_date, "xls"),
-    ]
-    for path in candidates:
-        if path.exists():
-            return path
-    pattern = f"Sensis IFTTool_{ifts_date:%d%m%Y}*.xls*"
-    matches = sorted(dest_dir.glob(pattern))
-    if matches:
-        return matches[0]
 
     ir_prefix = expected_sensis_ir_prefix(ifts_date)
-    pattern_ir = f"[sS]ensis_IR_{ifts_date:%m%d%Y}*.xls*"
+    pattern_ir = f"[sS]ensis_IR_*.xls*"
     matches = sorted(dest_dir.glob(pattern_ir))
     if matches:
         return matches[0]
     raise FileNotFoundError(
-        f"Fichier Sensis introuvable dans {dest_dir}: {pattern} ou {pattern_ir}"
+        f"Fichier Sensis introuvable dans {dest_dir}: {pattern_ir}"
     )
     
 
@@ -273,21 +260,11 @@ def apply_sensis_to_workbook(
         set_value("AT", entry.duration_total)
         set_value("AU", entry.sensis_total)
 
-        # Comparatifs CTP/Bloomberg
         def get_value(letter: str) -> object:
             idx = letter_to_index(letter) + 1
             return ws.cell(row=row, column=idx).value
 
-        set_value("BK", _sub_optional(get_value("AN"), get_value("AW")))
-        set_value("BL", _sub_optional(get_value("AO"), get_value("AX")))
-        set_value("BS", _sub_optional(get_value("AN"), get_value("BD")))
-        set_value("BT", _sub_optional(get_value("AO"), get_value("BE")))
-        set_value("BU", _sub_optional(get_value("AP"), get_value("BF")))
-        set_value("BV", _sub_optional(get_value("AQ"), get_value("BG")))
-        set_value("BW", _sub_optional(get_value("AR"), get_value("BH")))
-        set_value("BX", _sub_optional(get_value("AS"), get_value("BI")))
-        set_value("CA", _sub_optional(get_value("AW"), get_value("BD")))
-        set_value("CB", _sub_optional(get_value("AX"), get_value("BE")))
+       
 
         updated += 1
         updated_rows.append(

@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-
+from trioptima_import import (
+    aggregate_trioptima,
+    apply_trioptima_to_workbook,
+    build_trioptima_mapping,
+    expected_trioptima_prefix,
+    load_trioptima_table,
+    locate_trioptima_file,
+)
 from excel_read import label_duplicate_columns, read_xls_smart, read_xls_with_positions
 from io_zip import ensure_dir, extract_xls_from_zip
 from mail_outlook import (
@@ -19,7 +26,6 @@ from mail_outlook import (
 from perimeter import build_perimeter
 from sensis_import import (
     apply_sensis_to_workbook,
-    expected_sensis_name,
     load_sensis_table,
     locate_sensis_file,
 )
@@ -225,7 +231,7 @@ def render_workflow_tab(
 
     if st.button("📥 Charger & filtrer le périmètre"):
         try:
-            xls_paths = sorted([*dest_dir.glob("*.xls"), *dest_dir.glob("*.xlsx")])
+            xls_paths = sorted([*dest_dir.glob("*.xls")])
             if not xls_paths:
                 st.warning(
                     f"Aucun .xls/.xlsx trouvé dans {dest_dir}. Lance l’étape d’extraction d’abord."
@@ -252,41 +258,16 @@ def render_workflow_tab(
             out_path = dest_dir / out_name
             with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
                 result.to_excel(writer, sheet_name="Perimetre", index=False)
-            bio = BytesIO()
-            with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
-                result.to_excel(writer, sheet_name="Perimetre", index=False)
-            st.download_button(
-                label="⬇️ Télécharger le périmètre (Excel)",
-                data=bio.getvalue(),
-                file_name=out_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+
         except Exception as exc:
             st.exception(exc)
 
-    with st.expander("Recommandations de modélisation (noms vs positions, legs)"):
-        st.markdown(
-            """
-            **Colonnes: noms vs positions**
-            • Privilégier **les noms** (plus robustes aux insertions/suppressions).
-            • Gérer les **doublons** via suffixes `(Leg1)/(Leg2)`.
-            • Normaliser casse/espaces pour éviter les faux négatifs.
+    yaml_text = YAML_DEFAULT
 
-            **Colonnes répétées (Leg1/Leg2):**
-            • Détection et suffixage automatique.
-            • Pour passer en *tidy* plus tard: `pd.wide_to_long` / `stack`.
-            """
-        )
 
-    yaml_text = st.text_area("Mapping YAML", value=YAML_DEFAULT, height=360)
+    do_create_ift_file = st.button("Générer le fichier des IFTs")
 
-    col_ya, col_yb = st.columns(2)
-    with col_ya:
-        do_preview_yaml = st.button("🧪 Prévisualiser (YAML)")
-    with col_yb:
-        do_integrate_yaml = st.button("🧩 Intégrer avec YAML → template")
-
-    if do_preview_yaml or do_integrate_yaml:
+    if  do_create_ift_file:
         try:
             cfg = load_cfg(yaml_text)
             xls_paths = sorted([*dest_dir.glob("*.xls"), *dest_dir.glob("*.xlsx")])
@@ -304,23 +285,11 @@ def render_workflow_tab(
                 frames.append(df)
             df_all = pd.concat(frames, ignore_index=True, sort=False)
 
-            if do_preview_yaml:
-                prev = preview_yaml_rows(df_all, orders, cfg, limit=200)
-                st.success(f"Aperçu YAML: {len(prev)} lignes (tronqué à 200)")
-                st.dataframe(prev)
-
-            if do_integrate_yaml:
+            if do_create_ift_file:
                 out_xlsm = integrate_yaml_to_template(
                     df_all, orders, cfg, TEMPLATE_DEFAULT, dest_dir, file_tag, mode, ifts_date
                 )
-                st.success(f"✅ Intégration YAML terminée → {out_xlsm}")
-                with open(out_xlsm, "rb") as handle:
-                    st.download_button(
-                        label="⬇️ Télécharger le template rempli (.xlsx)",
-                        data=handle.read(),
-                        file_name=out_xlsm.name,
-                        mime="application/vnd.ms-excel.sheet.macroEnabled.12",
-                    )
+                st.success(f"Fichier généré → {out_xlsm}")
 
                 st.session_state["out_xlsm"] = str(out_xlsm)
                 st.session_state["ifts_date"] = ifts_date
@@ -331,8 +300,7 @@ def render_workflow_tab(
         st.divider()
         st.subheader("Étape 2.8 — Importer Sensis Bloomberg")
 
-        expected_file = expected_sensis_name(st.session_state.get("ifts_date", ifts_date))
-        st.caption(f"Fichier attendu dans le dossier prod : `{expected_file}`")
+        st.caption(f"Fichier attendu dans le dossier prod : `sensis_IR_*.xls`")
 
         if st.button("📊 Importer les données Sensis", key="import_sensis_btn"):
             try:
@@ -356,18 +324,63 @@ def render_workflow_tab(
                     if out_xlsm_path.suffix.lower() == ".xlsm"
                     else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                with open(out_xlsm_path, "rb") as handle:
-                    st.download_button(
-                        label="⬇️ Télécharger le fichier mis à jour (Sensis)",
-                        data=handle.read(),
-                        file_name=out_xlsm_path.name,
-                        mime=mime,
-                        key="download_sensis_updated",
-                    )
             except FileNotFoundError as exc:
                 st.error(str(exc))
             except Exception as exc:
                 st.exception(exc)
+
+        st.divider()
+        st.subheader("Étape 2.9 — Importer TriOptima")
+
+        triopt_prefix = expected_trioptima_prefix(st.session_state.get("ifts_date", ifts_date))
+        st.caption(f"Fichier attendu dans le dossier prod : `{triopt_prefix}*.csv`")
+
+        if st.button("📈 Importer les données TriOptima", key="import_trioptima_btn"):
+            try:
+                out_xlsm_path = Path(st.session_state["out_xlsm"])
+                triopt_dt = st.session_state.get("ifts_date", ifts_date)
+                triopt_path = locate_trioptima_file(dest_dir, triopt_dt)
+                st.write(f"Fichier TriOptima utilisé : **{triopt_path.name}**")
+
+                triopt_df = load_trioptima_table(triopt_path)
+                if triopt_df.empty:
+                    st.warning("Aucune ligne TriOptima avec FREE_TEXT_2 renseigné n'a été trouvée.")
+                    st.stop()
+
+                aggregated = aggregate_trioptima(triopt_df)
+                st.dataframe(aggregated, use_container_width=True)
+
+                mapping = build_trioptima_mapping(aggregated)
+                updated, missing_codes, preview_rows, unused_codes = apply_trioptima_to_workbook(
+                    out_xlsm_path, mapping
+                )
+                st.success(f"{updated} ligne(s) mise(s) à jour dans le template.")
+
+                if preview_rows:
+                    st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
+
+                if missing_codes:
+                    preview = ", ".join(missing_codes[:10])
+                    if len(missing_codes) > 10:
+                        preview += " …"
+                    st.warning(f"Codes DI absents du TriOptima : {preview}")
+
+                if unused_codes:
+                    preview = ", ".join(unused_codes[:10])
+                    if len(unused_codes) > 10:
+                        preview += " …"
+                    st.info(f"Codes TriOptima non utilisés dans le template : {preview}")
+
+                mime = (
+                    "application/vnd.ms-excel.sheet.macroEnabled.12"
+                    if out_xlsm_path.suffix.lower() == ".xlsm"
+                    else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+            except FileNotFoundError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.exception(exc)        
 
         st.divider()
         st.subheader("Étape 3 — Préparer l'email Outlook")
