@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import pandas as pd
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Tuple, TYPE_CHECKING
 
 from openpyxl import load_workbook
 
@@ -20,17 +21,17 @@ __all__ = [
 
 @dataclass
 class SensisEntry:
-    dirty_pct: float | None
-    clean_pct: float | None
-    accrued_pct: float | None
     sensis_leg1: float | None
     sensis_leg2: float | None
     duration_leg1: float | None
     duration_leg2: float | None
     duration_total: float | None
+    sensis_total_value: float | None
 
     @property
     def sensis_total(self) -> float | None:
+        if self.sensis_total_value is not None:
+            return self.sensis_total_value
         vals = [v for v in (self.sensis_leg1, self.sensis_leg2) if v is not None]
         if not vals:
             return None
@@ -40,11 +41,15 @@ class SensisEntry:
 def expected_sensis_name(ifts_date: date, suffix: str = "xlsx") -> str:
     return f"Sensis IFTTool_{ifts_date:%d%m%Y}.{suffix.lower()}"
 
+def expected_sensis_ir_prefix(ifts_date: date) -> str:
+    return f"sensis_IR_{ifts_date:%m%d%Y}"
+
 
 def locate_sensis_file(dest_dir: Path, ifts_date: date) -> Path:
     candidates = [
         dest_dir / expected_sensis_name(ifts_date, "xlsx"),
         dest_dir / expected_sensis_name(ifts_date, "xlsm"),
+        dest_dir / expected_sensis_name(ifts_date, "xls"),
     ]
     for path in candidates:
         if path.exists():
@@ -53,7 +58,16 @@ def locate_sensis_file(dest_dir: Path, ifts_date: date) -> Path:
     matches = sorted(dest_dir.glob(pattern))
     if matches:
         return matches[0]
-    raise FileNotFoundError(f"Fichier Sensis introuvable dans {dest_dir}: {pattern}")
+
+    ir_prefix = expected_sensis_ir_prefix(ifts_date)
+    pattern_ir = f"[sS]ensis_IR_{ifts_date:%m%d%Y}*.xls*"
+    matches = sorted(dest_dir.glob(pattern_ir))
+    if matches:
+        return matches[0]
+    raise FileNotFoundError(
+        f"Fichier Sensis introuvable dans {dest_dir}: {pattern} ou {pattern_ir}"
+    )
+    
 
 
 def _normalize_header(value: object) -> str:
@@ -70,29 +84,33 @@ def _normalize_header(value: object) -> str:
 
 _HEADER_ALIASES: Dict[str, Tuple[str, ...]] = {
     "code": ("code di",),
-    "notional": ("notional",),
-    "dirty_pct": ("dirty price %", "dirty price(%)"),
-    "clean_pct": ("clean price %", "clean price(%)"),
-    "accrued_pct": ("couru %", "accrued interest %"),
+    "notional": ("notional",)
 }
 
 
-def _find_header_row(ws, search_rows: int = 12) -> int:
-    max_row = min(ws.max_row, search_rows)
-    max_col = ws.max_column
-    for row in range(1, max_row + 1):
-        values = [ws.cell(row=row, column=col).value for col in range(1, max_col + 1)]
-        normed = {_normalize_header(v) for v in values if v is not None}
+
+
+
+def _find_header_row(df: pd.DataFrame, search_rows: int = 12) -> int:
+    max_row = min(len(df), search_rows)
+    max_col = df.shape[1]
+    for row in range(max_row):
+        values = df.iloc[row, :max_col].tolist()
+        normed = {
+            _normalize_header(v)
+            for v in values
+            if v is not None and not pd.isna(v)
+        }
         if any(alias in normed for alias in ("code di", "code")):
             return row
     return 3
 
 
-def _build_header_map(ws, header_row: int) -> Dict[str, int]:
+def _build_header_map(df: pd.DataFrame, header_row: int) -> Dict[str, int]:
     mapping: Dict[str, int] = {}
-    for col in range(1, ws.max_column + 1):
-        value = ws.cell(row=header_row, column=col).value
-        if value is None:
+    for col in range(df.shape[1]):
+        value = df.iat[header_row, col]
+        if value is None or pd.isna(value):
             continue
         key = _normalize_header(value)
         if key and key not in mapping:
@@ -108,49 +126,58 @@ def _column_for(header_map: Dict[str, int], logical: str) -> int | None:
     return None
 
 
-def _column_from_letter(letter: str) -> int:
-    return letter_to_index(letter) + 1
+def load_sensis_table(path: Path) -> Dict[str, SensisEntry]:
+    suffix = path.suffix.lower()
+    if suffix == ".xls":
+        engine = "xlrd"
+    elif suffix in {".xlsx", ".xlsm"}:
+        engine = "openpyxl"
+    else:
+        engine = None
+    df = pd.read_excel(path, header=None, engine=engine)
 
 
-def load_sensis_table(path: Path, sheet: str = "Valorisation - IFT - Valeur") -> Dict[str, SensisEntry]:
-    wb = load_workbook(path, data_only=True, read_only=True)
-    if sheet not in wb.sheetnames:
-        raise KeyError(f"Feuille '{sheet}' absente de {path.name}")
-    ws = wb[sheet]
-    header_row = _find_header_row(ws)
-    header_map = _build_header_map(ws, header_row)
+
+    header_row = _find_header_row(df)
+    header_map = _build_header_map(df, header_row)
 
     col_code = _column_for(header_map, "code")
     if col_code is None:
         raise KeyError("Colonne 'Code DI' introuvable dans Sensis")
 
-    col_dirty = _column_for(header_map, "dirty_pct")
-    col_clean = _column_for(header_map, "clean_pct")
-    col_accrued = _column_for(header_map, "accrued_pct")
+    col_sensis1 = letter_to_index("X")
+    col_dur1 = letter_to_index("Y")
+    col_dur2 = letter_to_index("AC")
+    col_sensis2 = letter_to_index("AD")
+    col_duration_total = letter_to_index("AL")
+    col_sensis_total = letter_to_index("AH")
 
-    col_sensis1 = _column_from_letter("AC")
-    col_sensis2 = _column_from_letter("AD")
-    col_dur1 = _column_from_letter("AE")
-    col_dur2 = _column_from_letter("AF")
-    col_dur_total = _column_from_letter("Z")
+    def _value(row_idx: int, col_idx: int | None) -> object | None:
+        if col_idx is None:
+            return None
+        if col_idx >= df.shape[1]:
+            return None
+        value = df.iat[row_idx, col_idx]
+        if value is None or pd.isna(value):
+            return None
+        return value
 
     data: Dict[str, SensisEntry] = {}
-    for row in range(header_row + 1, ws.max_row + 1):
-        code_cell = ws.cell(row=row, column=col_code).value
+    for row in range(header_row + 1, len(df)):
+        code_cell = _value(row, col_code) 
         if code_cell is None:
-            continue
+                continue
         code = str(code_cell).strip()
         if not code:
             continue
+
         entry = SensisEntry(
-            dirty_pct=ws.cell(row=row, column=col_dirty).value if col_dirty else None,
-            clean_pct=ws.cell(row=row, column=col_clean).value if col_clean else None,
-            accrued_pct=ws.cell(row=row, column=col_accrued).value if col_accrued else None,
-            sensis_leg1=ws.cell(row=row, column=col_sensis1).value,
-            sensis_leg2=ws.cell(row=row, column=col_sensis2).value,
-            duration_leg1=ws.cell(row=row, column=col_dur1).value,
-            duration_leg2=ws.cell(row=row, column=col_dur2).value,
-            duration_total=ws.cell(row=row, column=col_dur_total).value,
+            sensis_leg1=_value(row, col_sensis1),
+            sensis_leg2=_value(row, col_sensis2),
+            duration_leg1=_value(row, col_dur1),
+            duration_leg2=_value(row, col_dur2),
+            duration_total=_value(row, col_duration_total),
+            sensis_total_value=_value(row, col_sensis_total),
         )
         data[code] = entry
     return data
@@ -238,23 +265,13 @@ def apply_sensis_to_workbook(
             idx = letter_to_index(letter) + 1
             ws.cell(row=row, column=idx).value = value
 
-        dirty_pct = entry.dirty_pct
-        clean_pct = entry.clean_pct
-        accrued_pct = entry.accrued_pct
-
-        set_value("BE", dirty_pct)
-        set_value("BD", _mul(dirty_pct, notional))
-        set_value("BG", clean_pct)
-        set_value("BF", _mul(clean_pct, notional))
-        set_value("BI", accrued_pct)
-        set_value("BH", _mul(accrued_pct, notional))
 
         set_value("T", entry.duration_leg1)
         set_value("U", entry.sensis_leg1)
         set_value("AK", entry.duration_leg2)
         set_value("AL", entry.sensis_leg2)
         set_value("AT", entry.duration_total)
-        set_value("AU", _sum_optional([entry.sensis_leg1, entry.sensis_leg2]))
+        set_value("AU", entry.sensis_total)
 
         # Comparatifs CTP/Bloomberg
         def get_value(letter: str) -> object:
@@ -276,14 +293,12 @@ def apply_sensis_to_workbook(
         updated_rows.append(
             {
                 "Code DI": code,
-                "Dirty Price (%)": dirty_pct,
-                "Clean Price (%)": clean_pct,
-                "Couru (%)": accrued_pct,
                 "Sensis L1": entry.sensis_leg1,
                 "Sensis L2": entry.sensis_leg2,
                 "Duration L1": entry.duration_leg1,
                 "Duration L2": entry.duration_leg2,
                 "Duration Totale": entry.duration_total,
+                "Sensis Totale": entry.sensis_total
             }
         )
 
