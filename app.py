@@ -37,8 +37,6 @@ year_folder = ifts_date.strftime("%Y")
 month_folder = ifts_date.strftime("%m-%Y")
 dest_dir = base_out / year_folder / month_folder / "prod" / mode.lower()
 
-with st.expander("Chemins (lecture seule)"):
-    st.code(f"Source: {src_dir}\nDestination: {dest_dir}")
 
 # --- Patterns de recherche ---
 patterns = [
@@ -47,6 +45,7 @@ patterns = [
 ]
 
 tab_workflow, tab_analysis = st.tabs(["Production IFT", "Analyse ancienne prod"])
+
 with tab_workflow:
     render_workflow_tab(src_dir, dest_dir, patterns, file_tag, mode, ifts_date)
 with tab_analysis:

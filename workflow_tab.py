@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 import pandas as pd
@@ -41,6 +41,20 @@ from sensis_import import (
 )
 from yaml_apply import integrate_yaml_to_template, load_cfg, preview_yaml_rows
 
+PERIMETER_XLS_PREFIXES = ("IR_", "XCY_IR")
+
+
+def list_perimeter_xls(dest_dir: Path) -> list[Path]:
+    prefixes = tuple(prefix.upper() for prefix in PERIMETER_XLS_PREFIXES)
+    if not dest_dir.exists():
+        return []
+    return sorted(
+        p
+        for p in dest_dir.iterdir()
+        if p.is_file()
+        and p.suffix.lower() == ".xls"
+        and p.name.upper().startswith(prefixes)
+    )
 
 TEMPLATE_DEFAULT = Path(
     r"C:/Users/abenjelloun/OneDrive - Cooperactions/GAM-E-Risk Perf - RMP/1.PROD/4.REPORTINGS SPEC CLIENTS/1.Groupe - IFT (CB-JB)/IFT -template.xlsx"
@@ -290,10 +304,10 @@ def render_workflow_tab(
 
     if st.button("Filtrer le périmètre et générer le fichier des IFTs"):
         try:
-            xls_paths = sorted([*dest_dir.glob("*.xls")])
+            xls_paths = list_perimeter_xls(dest_dir)
             if not xls_paths:
                 st.warning(
-                    f"Aucun .xls/.xlsx trouvé dans {dest_dir}. Lance l’étape d’extraction d’abord."
+                    f"Aucun fichier périmètre IR_*.xls ou XY_IR_*.xls trouvé. Lance l’étape d’extraction d’abord."
                 )
                 st.stop()
             frames = []
@@ -313,9 +327,10 @@ def render_workflow_tab(
 
             yaml_text = YAML_DEFAULT
             cfg = load_cfg(yaml_text)
-            xls_paths = sorted([*dest_dir.glob("*.xls")])
+            xls_paths = list_perimeter_xls(dest_dir)
+
             if not xls_paths:
-                st.warning(f"Aucun .xls trouvé dans {dest_dir}.")
+                st.warning(f"Aucun fichier périmètre IR_*.xls ou XCY_IR_*.xls trouvé dans {dest_dir}.")
                 st.stop()
             frames = []
             orders: dict[str, dict[str, str]] = {}
@@ -399,8 +414,8 @@ def render_workflow_tab(
                 "- Valuation Date : la date des IFTs \n" \
                 "- Books : Cross Currency Swap , Swap CMS et Asset Swap Inflation \n" \
                 "- Template Name : RD_IFT Report IT\n" \
-                "- File Prefix : sensis_ pour le code puisse départager le fichier des sensis des fichiers DEX")
-        st.write("Télécharger le fichier une fois prêt et le mettre dans le dossier prod dans le mode choisi (fast ou closed)")
+                "- File Prefix : sensis_ pour que le code puisse départager le fichier des sensis des fichiers DEX")
+        st.write("Télécharger le fichier une fois prêt et le mettre dans le dossier prod dans le mode choisi (fast ou close)")
         if st.button("📊 Importer les données Sensis", key="import_sensis_btn"):
             try:
                 
@@ -428,10 +443,32 @@ def render_workflow_tab(
                     if out_xlsm_path.suffix.lower() == ".xlsm"
                     else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+                st.write('Les sensi des Real Rate Swap SD doivent encore être amélioré, utilisez svp les sensi ci dessous pour cette Asset Class pour les MD pour la Leg1')
+                st.write('Vous modifierez la colonne T du fichier des IFT (Leg1 Modified Durantion)')
+                data = """Code DI\tModified Duration
+                    SWAP_258\t-0,98
+                    SWAP_253\t-0,98
+                    SWAP_240\t-1,83
+                    SWAP_262\t-0,98
+                    SWAP_254\t-0,98
+                    SWAP_257\t-0,98
+                    SWAP_235\t-3,65
+                    SWAP_149\t-3,65
+                    SWAP_255\t-0,98
+                    SWAP_234\t-3,65
+                    SWAP_148\t-3,65
+                    """
+                from io import StringIO
+                df_sensi_rrl = pd.read_csv(StringIO(data), sep="\t", decimal=",")
+                st.write('Vous pouvez enregistrer le fichier en csv en haut à droite du tableau et faire un RECHERCHEV par exemple')
+                st.dataframe(df_sensi_rrl)
+                
             except FileNotFoundError as exc:
                 st.error(str(exc))
             except Exception as exc:
                 st.exception(exc)
+
+        
 
         st.divider()
         st.subheader("Importer TriOptima - Rajouter les prix contreparties pour les swaps, et les données des Bonds Forwards")

@@ -86,6 +86,47 @@ def normalize_label(value, mapping: Mapping[str, str] | None = None) -> str | No
             return canonical
     return cleaned.upper()
 
+def _first_notna(series: pd.Series):
+    for value in series:
+        if pd.notna(value):
+            return value
+    return None
+
+
+def _sum_notna(series: pd.Series) -> float:
+    total = 0.0
+    has_value = False
+    for value in series:
+        if pd.isna(value):
+            continue
+        total += float(value)
+        has_value = True
+    return total if has_value else 0.0
+
+
+def _aggregate_by_norm(
+    df: pd.DataFrame,
+    *,
+    text_columns: Iterable[str],
+    value_columns: Iterable[str],
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    agg_spec: dict[str, object] = {}
+    for col in text_columns:
+        if col in df.columns:
+            agg_spec[col] = _first_notna
+    for col in value_columns:
+        if col in df.columns:
+            agg_spec[col] = _sum_notna
+    if not agg_spec:
+        return df
+    grouped = (
+        df.groupby(["Norm Counterparty", "Norm Typologie"], as_index=False).agg(
+            agg_spec
+        )
+    )
+    return grouped
 
 def find_collateral_report(dest_dir: Path) -> Path:
     candidates = sorted(dest_dir.glob("*Report Collatéral.xlsx"))
@@ -273,6 +314,17 @@ def build_collateral_comparison(
 
     tmpl = tmpl.dropna(subset=["Norm Counterparty", "Norm Typologie"], how="any")
     coll = coll.dropna(subset=["Norm Counterparty", "Norm Typologie"], how="any")
+
+    tmpl = _aggregate_by_norm(
+        tmpl,
+        text_columns=("Counterparty", "Classif DI"),
+        value_columns=("MtM Gam", "MtM Counterparty"),
+    )
+    coll = _aggregate_by_norm(
+        coll,
+        text_columns=("Counterparty", "Typologie"),
+        value_columns=("MtM Gam", "MtM Counterparty"),
+    )
 
     merged = coll.merge(
         tmpl,

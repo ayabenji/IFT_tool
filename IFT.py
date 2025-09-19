@@ -7,6 +7,7 @@ import shutil
 # -----------------------------
 # Helpers
 # -----------------------------
+PERIMETER_XLS_PREFIXES = ("IR_", "XCY_IR")
 
 def next_business_day(d: date) -> date:
     """Return the next business day (Mon–Fri), ignoring public holidays."""
@@ -48,6 +49,18 @@ def extract_xls_from_zip(zip_path: Path, dest_dir: Path) -> list[Path]:
                 extracted.append(target)
     return extracted
 
+def list_perimeter_xls(dest_dir: Path) -> list[Path]:
+    """Return sorted .xls files limited to the expected IR perimeter prefixes."""
+    prefixes = tuple(prefix.upper() for prefix in PERIMETER_XLS_PREFIXES)
+    if not dest_dir.exists():
+        return []
+    return sorted(
+        p
+        for p in dest_dir.iterdir()
+        if p.is_file()
+        and p.suffix.lower() == ".xls"
+        and p.name.upper().startswith(prefixes)
+    )
 
 # -----------------------------
 # App UI
@@ -75,12 +88,7 @@ base_out = Path(r"C:\Users\abenjelloun\OneDrive - Cooperactions\GAM-E-Risk Perf 
 
 year_folder = ifts_date.strftime("%Y")
 month_folder = ifts_date.strftime("%m-%Y")
-dest_dir = base_out / year_folder / month_folder / "prod" / mode.lower()
-
-with st.expander("Chemins (lecture seule)"):
-    st.code(f"Source: {src_dir}\nDestination: {dest_dir}")
-
-# Search patterns
+dest_dir = base_out / year_folder / month_folder / "prod" / mode.lower()# Search patterns
 patterns = [
     f"XCY_IR_{file_tag}*.zip",
     f"IR_{file_tag}*.zip",
@@ -254,9 +262,12 @@ st.write("On charge les .xls extraits, on filtre **Custom Attribute5 Value** non
 
 if st.button("📥 Charger & filtrer le périmètre"):
     try:
-        xls_paths = sorted(dest_dir.glob("*.xls"))
+        xls_paths = list_perimeter_xls(dest_dir)
+   
         if not xls_paths:
-            st.warning(f"Aucun .xls trouvé dans {dest_dir}. Lance l'étape d'extraction d'abord.")
+            st.warning(
+                "Aucun fichier périmètre IR_*.xls ou XCY_IR_*.xls trouvé. Lance d'abord l'extraction."
+            )
             st.stop()
 
         frames = []
@@ -421,9 +432,11 @@ def _load_raw_with_colorders() -> tuple[pd.DataFrame, dict[str, list[str]]]:
     """Relit les .xls pour récupérer un DataFrame consolidé ET l'ordre exact des colonnes par fichier.
     Retourne (raw_df, colorders_by_file) où colorders_by_file[file_name] = [colA, colB, ...] (ordre natif).
     """
-    xls_paths = sorted(dest_dir.glob("*.xls"))
+    xls_paths = list_perimeter_xls(dest_dir)
     if not xls_paths:
-        raise FileNotFoundError(f"Aucun .xls trouvé dans {dest_dir}. Lance d'abord l'extraction.")
+        raise FileNotFoundError(
+            "Aucun fichier périmètre IR_*.xls ou XCY_IR_*.xls trouvé. Lance d'abord l'extraction."
+        )
     frames = []
     orders: dict[str, list[str]] = {}
     for p in xls_paths:

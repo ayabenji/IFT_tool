@@ -453,7 +453,7 @@ def apply_bndfwd_to_workbook(
         ws.cell(row=current_row, column=letter_to_index("I") + 1).value = threshold
         ws.cell(row=current_row, column=letter_to_index("J") + 1).value = diff_ratio
 
-        is_alert = diff_ratio is not None and diff_ratio > threshold
+        is_alert = diff_ratio is not None and abs(diff_ratio) > threshold
         ws.cell(row=current_row, column=alert_col).value = "alerte" if is_alert else None
         if is_alert:
             alerts.append(label)

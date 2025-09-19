@@ -10,6 +10,8 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string
+from openpyxl.worksheet.worksheet import Worksheet
+
 
 from excel_read import _norm
 
@@ -37,6 +39,7 @@ CATEGORY_ALIASES: dict[str, set[str]] = {
     "IR_SWAP": _norm_aliases("IR Swap", "IR - Swap", "CMS Swap"),
     "ASWI": _norm_aliases("ASWI", "IR ASWI", "Real Rate Swap"),
     "XCCY": _norm_aliases("XCCY", "IR XCCY", "Cross Currency Swap"),
+    "BOND_FWD": _norm_aliases("Bond Forward", "Bond Fwd", "Bond FWD", "BondForward"),
 }
 
 
@@ -64,9 +67,16 @@ MTM_SUMMARY_ITEMS: tuple[MtMSummaryItem, ...] = (
         categories=("XCCY",),
         bullet="o ",
         needs_reason=True,
-    )
+    ),
+        MtMSummaryItem(
+        label="Bond Forward",
+        categories=("BOND_FWD",),
+        bullet="- ",
+        needs_reason=True,
+    ),
+)
 
-    )
+    
 
 def _extract_date_from_name(name: str) -> date | None:
     match = DATE_IN_NAME.search(name)
@@ -184,43 +194,96 @@ def _to_float(value) -> float | None:
 
 def aggregate_dirty_by_classif(path: Path) -> dict[str, float]:
     wb = load_workbook(path, data_only=True, read_only=True)
-    if ANALYSIS_SHEET not in wb.sheetnames:
-        raise KeyError(f"Feuille '{ANALYSIS_SHEET}' absente de {path.name}")
-    ws = wb[ANALYSIS_SHEET]
-    classif_col = None
-    max_col = ws.max_column
-    for col in range(1, max_col + 1):
-        header_val = ws.cell(row=ANALYSIS_HEADER_ROW, column=col).value
-        if header_val is None:
-            continue
-        if _norm(header_val) == _norm("Classif DI"):
-            classif_col = col
-            break
-    if classif_col is None:
-        raise KeyError("Colonne 'Classif DI' introuvable")
-    dirty_idx = column_index_from_string(ANALYSIS_DIRTY_LETTER)
+    bond_forward_total: float | None = None
     totals: dict[str, float] = {}
-    for row in ws.iter_rows(
-        min_row=ANALYSIS_HEADER_ROW + 1,
+    try:
+        if ANALYSIS_SHEET not in wb.sheetnames:
+            raise KeyError(f"Feuille '{ANALYSIS_SHEET}' absente de {path.name}")
+        ws = wb[ANALYSIS_SHEET]
+        classif_col = None
+        max_col = ws.max_column
+        for col in range(1, max_col + 1):
+            header_val = ws.cell(row=ANALYSIS_HEADER_ROW, column=col).value
+            if header_val is None:
+                continue
+            if _norm(header_val) == _norm("Classif DI"):
+                classif_col = col
+                break
+        if classif_col is None:
+            raise KeyError("Colonne 'Classif DI' introuvable")
+        dirty_idx = column_index_from_string(ANALYSIS_DIRTY_LETTER)
+        for row in ws.iter_rows(
+            min_row=ANALYSIS_HEADER_ROW + 1,
+            max_row=ws.max_row,
+            values_only=True,
+        ):
+            if classif_col - 1 >= len(row) or dirty_idx - 1 >= len(row):
+                continue
+            classif_raw = row[classif_col - 1]
+            dirty_raw = row[dirty_idx - 1]
+            if classif_raw is None:
+                continue
+            classif = str(classif_raw).strip()
+            if not classif:
+                continue
+            dirty = _to_float(dirty_raw)
+            if dirty is None:
+                continue
+            totals[classif] = totals.get(classif, 0.0) + dirty
+        if "BND FWD" in wb.sheetnames:
+            bond_forward_total = _sum_bnd_fwd_prix_gam(wb["BND FWD"])
+    finally:
+        wb.close()
+    if bond_forward_total is not None:
+        totals["Bond Forward"] = totals.get("Bond Forward", 0.0) + bond_forward_total
+    return totals
+
+def _find_column_by_header(
+    ws: Worksheet, header: str, *, max_search_rows: int = 12
+) -> tuple[int | None, int | None]:
+    target = _norm(header)
+    for row_idx, row in enumerate(
+        ws.iter_rows(
+            min_row=1,
+            max_row=min(max_search_rows, ws.max_row),
+            max_col=ws.max_column,
+            values_only=True,
+        ),
+        start=1,
+    ):
+        for col_idx, value in enumerate(row, start=1):
+            if value is None:
+                continue
+            if _norm(str(value)) == target:
+                return col_idx, row_idx
+    return None, None
+
+
+def _sum_bnd_fwd_prix_gam(ws: Worksheet) -> float | None:
+    prix_col, header_row = _find_column_by_header(ws, "Prix GAM")
+    if prix_col is None or header_row is None:
+        return None
+    total = 0.0
+    found = False
+    for row in ws.iter_rows( min_row=header_row + 1,
         max_row=ws.max_row,
         values_only=True,
     ):
-        if classif_col - 1 >= len(row) or dirty_idx - 1 >= len(row):
+        if prix_col - 1 >= len(row):
             continue
-        classif_raw = row[classif_col - 1]
-        dirty_raw = row[dirty_idx - 1]
-        if classif_raw is None:
+        value = row[prix_col - 1]
+        numeric = _to_float(value)
+        if numeric is None:
             continue
-        classif = str(classif_raw).strip()
-        if not classif:
-            continue
-        dirty = _to_float(dirty_raw)
-        if dirty is None:
-            continue
-        totals[classif] = totals.get(classif, 0.0) + dirty
-    wb.close()
-    return totals
+        total += numeric
+        found = True
+    return total if found else None
 
+
+    
+
+    
+    
 
 def build_comparison_dataframe(
     current_map: dict[str, float], previous_map: dict[str, float]
