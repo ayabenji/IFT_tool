@@ -17,6 +17,13 @@ from trioptima_import import (
     filter_bndfwd_rows,
     
 )
+from collateral_compare import (
+    aggregate_template_mtm,
+    build_collateral_comparison,
+    find_collateral_report,
+    load_collateral_summary,
+    parse_alias_mapping,
+)
 from excel_read import label_duplicate_columns, read_xls_smart, read_xls_with_positions
 from io_zip import ensure_dir, extract_xls_from_zip
 from mail_outlook import (
@@ -179,6 +186,52 @@ computed:
     target_occurrence: 3
     expr: "accrued_tot / notional_leg1"
 """
+DEFAULT_COLLATERAL_CP_ALIASES = """\
+# Alias contreparties → valeur canonique
+SGCIB = SOCIETE GENERALE
+SOCIETE GENERALE = SOCIETE GENERALE
+BAMLS = BOFA SECURITIES
+BOFA = BOFA SECURITIES
+BOFA SECURITIES = BOFA SECURITIES
+RBS = NATWEST MARKETS
+NATWEST = NATWEST MARKETS
+NATWEST MARKETS = NATWEST MARKETS
+BARCLAYS = BARCLAYS BANK
+BARCLAYS BANK = BARCLAYS BANK
+GSOH = GOLDMAN SACHS
+GOLDMAN SACHS = GOLDMAN SACHS
+HSBCFR = HSBC CONTINENTAL EUROPE
+HSBC = HSBC CONTINENTAL EUROPE
+HSBC CONTINENTAL EUROPE = HSBC CONTINENTAL EUROPE
+CREDIT SUISSE = CREDIT SUISSE
+NOMURA = NOMURA FINANCIAL
+NOMURA FINANCIAL = NOMURA FINANCIAL
+MORGAN STANLEY = MORGAN STANLEY
+BNPP = BNP PARIBAS
+BNP PARIBAS = BNP PARIBAS
+JPMSE = JP MORGAN SE
+JP MORGAN = JP MORGAN SE
+JP MORGAN SE = JP MORGAN SE
+JPM = JP MORGAN SE
+NATIXIS = NATIXIS
+CA = CREDIT AGRICOLE
+CEP = CREDIT AGRICOLE
+CEPS = CREDIT AGRICOLE
+CACIB = CREDIT AGRICOLE
+CREDIT AGRICOLE = CREDIT AGRICOLE
+""".strip()
+
+
+DEFAULT_COLLATERAL_TYPOLOGY_ALIASES = """\
+# Typologie → valeur canonique
+Real Rate Swap = XpressInstrument
+XpressInstrument = XpressInstrument
+CMS Swap = IR swap, fixed/float
+IR swap, fixed/float = IR swap, fixed/float
+Cross Currency Swap = Cross currency, fixed/fixed
+Cross currency, fixed/fixed = Cross currency, fixed/fixed
+Forward = Forward
+""".strip()
 
 
 def render_workflow_tab(
@@ -189,8 +242,11 @@ def render_workflow_tab(
     mode: str,
     ifts_date: date,
 ) -> None:
-    with st.expander("Chemins (lecture seule)"):
+    with st.expander("Chemins qui sont utilisés pour récupérer les DEX SD"):
         st.code(f"Source: {src_dir}\nDestination: {dest_dir}")
+    st.warning(f"Renseigner bien la date des IFTs et le mode -> date de valo - 19/09/2025 pour le fast de ce mois.")
+    st.write("Dans les dex SD, c'est le fichier du jour ouvré suivant. Le code les récupère directement. Appuyer sur le bouton.")
+
 
     if st.button("🔎 Rechercher & extraire"):
         try:
@@ -227,12 +283,12 @@ def render_workflow_tab(
         except Exception as exc:
             st.exception(exc)
 
-    st.header("Étape 2 — Définir le périmètre depuis les XLS/XLSX")
+    st.header("Définir le périmètre depuis les fichiers SD")
     st.write(
-        "On charge les fichiers extraits, on filtre **Custom Attribute5 Value** non vide (→ `Code DI`), et on sort `Classif DI` + méta."
+        "On charge les fichiers extraits, on filtre par rapport à **Custom Attribute5 Value** non vide (→ `Code DI`), et on génère le fichier des IFTS qui sera rempli dans les étapes suivantes."
     )
 
-    if st.button("📥 Charger & filtrer le périmètre"):
+    if st.button("Filtrer le périmètre et générer le fichier des IFTs"):
         try:
             xls_paths = sorted([*dest_dir.glob("*.xls")])
             if not xls_paths:
@@ -254,28 +310,12 @@ def render_workflow_tab(
             st.info(
                 f"Déduplication: {meta['dedup_before']} → {meta['dedup_after']} lignes (clés: {meta['dedup_keys']})"
             )
-            st.success(f"✅ Périmètre construit: {len(result)} lignes")
-            st.dataframe(result.head(50))
 
-            out_name = f"perimetre_IFTS_{file_tag}.xlsx"
-            out_path = dest_dir / out_name
-            with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
-                result.to_excel(writer, sheet_name="Perimetre", index=False)
-
-        except Exception as exc:
-            st.exception(exc)
-
-    yaml_text = YAML_DEFAULT
-
-
-    do_create_ift_file = st.button("Générer le fichier des IFTs")
-
-    if  do_create_ift_file:
-        try:
+            yaml_text = YAML_DEFAULT
             cfg = load_cfg(yaml_text)
-            xls_paths = sorted([*dest_dir.glob("*.xls"), *dest_dir.glob("*.xlsx")])
+            xls_paths = sorted([*dest_dir.glob("*.xls")])
             if not xls_paths:
-                st.warning(f"Aucun .xls/.xlsx trouvé dans {dest_dir}.")
+                st.warning(f"Aucun .xls trouvé dans {dest_dir}.")
                 st.stop()
             frames = []
             orders: dict[str, dict[str, str]] = {}
@@ -287,26 +327,87 @@ def render_workflow_tab(
                 df["__source_file__"] = path.name
                 frames.append(df)
             df_all = pd.concat(frames, ignore_index=True, sort=False)
-
-            if do_create_ift_file:
-                out_xlsm = integrate_yaml_to_template(
-                    df_all, orders, cfg, TEMPLATE_DEFAULT, dest_dir, file_tag, mode, ifts_date
+            out_xlsm = integrate_yaml_to_template(
+                    df_all, orders, cfg, TEMPLATE_DEFAULT, dest_dir, ifts_date, mode, ifts_date
                 )
-                st.success(f"Fichier généré → {out_xlsm}")
+            st.success(f"Fichier généré → {out_xlsm}")
 
-                st.session_state["out_xlsm"] = str(out_xlsm)
-                st.session_state["ifts_date"] = ifts_date
+            st.session_state["out_xlsm"] = str(out_xlsm)
+            st.session_state["ifts_date"] = ifts_date
+
+            st.write("Le fichier des IFTs avec les prix de Gam étant près, on envoie le mail à Sebastier Verger pour qu'il vérifie que les données SD sont en ligne avec les données dans SCD qui rentrent dans le rapport EMIR envoyé par DQM. " )
+            st.write("En appuyant sur le bouton : Préparer les brouillons des emails à envoyer : \n" 
+            "-> 3 mails seront préparés :\n " 
+            "- Le premier qui demandera à Sebastier Verger de vérifier les données SD.\n" \
+            "- Le deuxième qui demandera au MO (Sylvain) d'envoyer le fichier trioptima du jour des IFTs dès que possible.\n" \
+            "- Le troisième qui demandera au MO d'envoyer le report de Collatéral close du jours des IFTs.")
+
+
         except Exception as exc:
             st.exception(exc)
 
+    
+        
     if "out_xlsm" in st.session_state:
+
         st.divider()
-        st.subheader("Étape 2.8 — Importer Sensis Bloomberg")
+        st.subheader(" Préparer l'email Outlook")
 
-        st.caption(f"Fichier attendu dans le dossier prod : `sensis_IR_*.xls`")
+        to_default = (
+            "DOS SANTOS Nicolas <NDosSantos@groupama-am.fr>; VERGER Sebastien <SVerger@groupama-am.fr>; "
+            "GAM MO - Collateral <Collateral-GAM@groupama-am.fr>"
+        )
+        cc_default = (
+            "BIDA MBOKE Jerry <JBidaMboke@groupama-am.fr>; GAM DQM-Pricing <DQM-Pricing@groupama-am.fr>; "
+            "GAM MO - Derivatives <middleofficederivesOTC@groupama-am.fr>; "
+            "GAM Liste Risques Performances <RisquesPerformances@groupama-am.fr>"
+        )
+        trio_to_default = "GAM MO - Collateral <Collateral-GAM@groupama-am.fr>"
+        trio_cc_default = (
+            "GAM DQM-Pricing <DQM-Pricing@groupama-am.fr>; GAM Liste Risques Performances <RisquesPerformances@groupama-am.fr>;"
+            "BIDA MBOKE Jerry <JBidaMboke@groupama-am.fr>; VERGER Sebastien <SVerger@groupama-am.fr>"
+        )
+        coll_to_default = "GAM MO - Collateral <Collateral-GAM@groupama-am.fr>"
+        coll_cc_default = (
+            "BIDA MBOKE Jerry <JBidaMboke@groupama-am.fr>; GAM Liste Risques Performances <RisquesPerformances@groupama-am.fr>;"
+            "CHAGROT Rene-Louis <RLChagrot@groupama-am.fr>"
+        )
 
+        if st.button("✉️ Préparer les brouillons des emails Outlook à envoyer", key="prepare_mail_btn"):
+            try:
+                out_xlsm_path = Path(st.session_state["out_xlsm"])
+                ifts_dt = st.session_state.get("ifts_date", ifts_date)
+                final_name = build_ifts_filename(ifts_dt)
+                attach_path = export_xlsx_copy(out_xlsm_path, final_name)
+                prepare_outlook_draft(attach_path, ifts_dt, to=to_default, cc=cc_default)
+                prepare_trioptima_request_mail(ifts_dt, to=trio_to_default, cc=trio_cc_default)
+                prepare_collateral_report_request_mail(ifts_dt, to=coll_to_default, cc=coll_cc_default)
+                st.success(
+                    "Trois brouillons Outlook ouverts : 1) VALO IFT avec PJ ; 2) Demande Trioptima ; 3) Report collatéral."
+                )
+                rerun = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+                if callable(rerun):
+                    rerun()
+            except Exception as exc:
+                st.exception(exc)
+                
+        st.divider()
+        st.subheader(" Enrichir le fichier des IFTs avec les sensis SD ")
+        st.write("Lancer dans File Upload and Report Activation dans la page Blotter de SD, un report activation. On sélectionne \n" \
+                "- Product : IR\n" \
+                "- Report Type : MTM IPA \n" \
+                "- Valuation Date : la date des IFTs \n" \
+                "- Books : Cross Currency Swap , Swap CMS et Asset Swap Inflation \n" \
+                "- Template Name : RD_IFT Report IT\n" \
+                "- File Prefix : sensis_ pour le code puisse départager le fichier des sensis des fichiers DEX")
+        st.write("Télécharger le fichier une fois prêt et le mettre dans le dossier prod dans le mode choisi (fast ou closed)")
         if st.button("📊 Importer les données Sensis", key="import_sensis_btn"):
             try:
+                
+                
+
+                st.caption(f"Fichier attendu dans le dossier prod : `sensis_IR_*.xls`")
+
                 out_xlsm_path = Path(st.session_state["out_xlsm"])
                 sensis_dt = st.session_state.get("ifts_date", ifts_date)
                 sensis_path = locate_sensis_file(dest_dir, sensis_dt)
@@ -333,8 +434,8 @@ def render_workflow_tab(
                 st.exception(exc)
 
         st.divider()
-        st.subheader("Étape 2.9 — Importer TriOptima")
-
+        st.subheader("Importer TriOptima - Rajouter les prix contreparties pour les swaps, et les données des Bonds Forwards")
+        st.write("Récupérer le fichier envoyé par le MO (Sylvain) daté du jour des IFTs et le mettre dans le dossier prod ")
         triopt_prefix = expected_trioptima_prefix(st.session_state.get("ifts_date", ifts_date))
         st.caption(f"Fichier attendu dans le dossier prod : `{triopt_prefix}*.csv`")
 
@@ -354,11 +455,8 @@ def render_workflow_tab(
                 aggregated = aggregate_trioptima(triopt_df)
                 if aggregated.empty:
                     st.warning("Aucune ligne TriOptima avec FREE_TEXT_2 renseigné n'a été trouvée.")
-                else:
-                    st.dataframe(aggregated, use_container_width=True)
-
                 mapping = build_trioptima_mapping(aggregated)
-                
+
                 if mapping:
                     (
                         updated,
@@ -368,8 +466,6 @@ def render_workflow_tab(
                     ) = apply_trioptima_to_workbook(out_xlsm_path, mapping)
                     st.success(f"{updated} ligne(s) mise(s) à jour dans le template.")
 
-                    if preview_rows:
-                        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
 
                     if missing_codes:
                         preview = ", ".join(missing_codes[:10])
@@ -424,11 +520,6 @@ def render_workflow_tab(
                                 ]
                                 if col in bndfwd_rows.columns
                             ]
-                            if preview_cols:
-                                st.dataframe(
-                                    bndfwd_rows[preview_cols].head(50),
-                                    use_container_width=True,
-                                )
 
                         if bnd_preview:
                             st.dataframe(pd.DataFrame(bnd_preview), use_container_width=True)
@@ -458,43 +549,129 @@ def render_workflow_tab(
             except Exception as exc:
                 st.exception(exc)        
 
+        
+
         st.divider()
-        st.subheader("Étape 3 — Préparer l'email Outlook")
+        st.subheader("Étape 2.10 — Contrôle du report collatéral")
 
-        to_default = (
-            "DOS SANTOS Nicolas <NDosSantos@groupama-am.fr>; VERGER Sebastien <SVerger@groupama-am.fr>; "
-            "GAM MO - Collateral <Collateral-GAM@groupama-am.fr>"
-        )
-        cc_default = (
-            "BIDA MBOKE Jerry <JBidaMboke@groupama-am.fr>; GAM DQM-Pricing <DQM-Pricing@groupama-am.fr>; "
-            "GAM MO - Derivatives <middleofficederivesOTC@groupama-am.fr>; "
-            "GAM Liste Risques Performances <RisquesPerformances@groupama-am.fr>"
-        )
-        trio_to_default = "GAM MO - Collateral <Collateral-GAM@groupama-am.fr>"
-        trio_cc_default = (
-            "GAM DQM-Pricing <DQM-Pricing@groupama-am.fr>; GAM Liste Risques Performances <RisquesPerformances@groupama-am.fr>;"
-            "BIDA MBOKE Jerry <JBidaMboke@groupama-am.fr>; VERGER Sebastien <SVerger@groupama-am.fr>"
-        )
-        coll_to_default = "GAM MO - Collateral <Collateral-GAM@groupama-am.fr>"
-        coll_cc_default = (
-            "BIDA MBOKE Jerry <JBidaMboke@groupama-am.fr>; GAM Liste Risques Performances <RisquesPerformances@groupama-am.fr>;"
-            "CHAGROT Rene-Louis <RLChagrot@groupama-am.fr>"
-        )
+        with st.expander("📊 Comparer le template avec le report collatéral", expanded=False):
+            st.caption(
+                "Recherche dans le dossier destination un fichier `*Report Collatéral.xlsx` puis compare les MtM."
+            )
 
-        if st.button("✉️ Préparer les brouillons des emails Outlook à envoyer", key="prepare_mail_btn"):
-            try:
-                out_xlsm_path = Path(st.session_state["out_xlsm"])
-                ifts_dt = st.session_state.get("ifts_date", ifts_date)
-                final_name = build_ifts_filename(ifts_dt)
-                attach_path = export_xlsx_copy(out_xlsm_path, final_name)
-                prepare_outlook_draft(attach_path, ifts_dt, to=to_default, cc=cc_default)
-                prepare_trioptima_request_mail(ifts_dt, to=trio_to_default, cc=trio_cc_default)
-                prepare_collateral_report_request_mail(ifts_dt, to=coll_to_default, cc=coll_cc_default)
-                st.success(
-                    "Trois brouillons Outlook ouverts : 1) VALO IFT avec PJ ; 2) Demande Trioptima ; 3) Report collatéral."
-                )
-                rerun = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
-                if callable(rerun):
-                    rerun()
-            except Exception as exc:
-                st.exception(exc)
+            st.session_state.setdefault(
+                "collateral_cp_aliases", DEFAULT_COLLATERAL_CP_ALIASES
+            )
+            st.session_state.setdefault(
+                "collateral_typ_aliases", DEFAULT_COLLATERAL_TYPOLOGY_ALIASES
+            )
+
+            cp_alias_text = st.text_area(
+                "Alias contreparties",
+                key="collateral_cp_aliases",
+                help="Format : alias = valeur canonique (un par ligne).",
+            )
+            typ_alias_text = st.text_area(
+                "Alias typologies",
+                key="collateral_typ_aliases",
+                help="Format : alias = valeur canonique (un par ligne).",
+            )
+
+            counterparty_aliases = parse_alias_mapping(cp_alias_text)
+            typology_aliases = parse_alias_mapping(typ_alias_text)
+
+            if st.button(
+                "🔍 Calculer les écarts collatéral",
+                key="compare_collateral_btn",
+            ):
+                try:
+                    out_xlsm_path = Path(st.session_state["out_xlsm"])
+                except KeyError:
+                    st.warning("Génère d'abord le fichier IFT pour lancer la comparaison.")
+                else:
+                    try:
+                        collateral_path = find_collateral_report(dest_dir)
+                    except FileNotFoundError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.write(
+                            f"Report collatéral utilisé : **{collateral_path.name}**"
+                        )
+                        try:
+                            collateral_df = load_collateral_summary(collateral_path)
+                        except Exception as exc:
+                            st.exception(exc)
+                        else:
+                            try:
+                                template_df = aggregate_template_mtm(out_xlsm_path)
+                            except Exception as exc:
+                                st.exception(exc)
+                            else:
+                                with st.expander(
+                                    "Données sources chargées", expanded=False
+                                ):
+                                    st.markdown("**Synthèse report collatéral**")
+                                    st.dataframe(
+                                        collateral_df, use_container_width=True
+                                    )
+                                    st.markdown("**Agrégats template IFT**")
+                                    st.dataframe(
+                                        template_df, use_container_width=True
+                                    )
+
+                                comparison = build_collateral_comparison(
+                                    template_df,
+                                    collateral_df,
+                                    counterparty_aliases=counterparty_aliases,
+                                    typology_aliases=typology_aliases,
+                                )
+
+                                if comparison.empty:
+                                    st.info(
+                                        "Aucune ligne comparable entre le template et le report collatéral."
+                                    )
+                                else:
+                                    max_abs = (
+                                        comparison[
+                                            [
+                                                "Ecart MtM Gam",
+                                                "Ecart MtM Counterparty",
+                                            ]
+                                        ]
+                                        .abs()
+                                        .to_numpy()
+                                    ).max()
+                                    if max_abs < 1e-6:
+                                        st.success(
+                                            "Les montants agrégés concordent avec le report collatéral."
+                                        )
+                                    else:
+                                        st.warning(
+                                            f"Écart absolu maximal : {max_abs:,.2f}"
+                                        )
+
+                                    st.dataframe(
+                                        comparison, use_container_width=True
+                                    )
+
+                                    csv_bytes = (
+                                        comparison.to_csv(index=False).encode("utf-8-sig")
+                                    )
+                                    st.download_button(
+                                        "⬇️ Exporter les écarts (CSV)",
+                                        data=csv_bytes,
+                                        file_name="ecarts_collateral.csv",
+                                        mime="text/csv",
+                                    )
+
+                                    excel_buffer = BytesIO()
+                                    comparison.to_excel(excel_buffer, index=False)
+                                    st.download_button(
+                                        "⬇️ Exporter les écarts (Excel)",
+                                        data=excel_buffer.getvalue(),
+                                        file_name="ecarts_collateral.xlsx",
+                                        mime=(
+                                            "application/vnd.openxmlformats-officedocument."
+                                            "spreadsheetml.sheet"
+                                        ),
+                                    )    
