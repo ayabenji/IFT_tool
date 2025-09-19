@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, Tuple, TYPE_CHECKING
 
@@ -207,12 +207,79 @@ def _sub_optional(left: object, right: object) -> float | None:
         return None
     return (lf or 0.0) - (rf or 0.0)
 
+def _coerce_to_date(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)):
+        if value <= 0:
+            return None
+        epoch = date(1899, 12, 30)
+        try:
+            return epoch + timedelta(days=float(value))
+        except OverflowError:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def _year_fraction(start: date | None, end: date | None) -> float | None:
+    if start is None or end is None:
+        return None
+    delta_days = (end - start).days
+    if delta_days < 0:
+        return 0.0
+    return delta_days / 365.25
+
+
+def _threshold_for(
+    classif: object,
+    index_rate: object,
+    maturity_years: float | None,
+) -> float | None:
+    if maturity_years is None:
+        return None
+    classif_norm = str(classif).strip().lower() if classif is not None else ""
+    index_norm = str(index_rate).strip().upper() if index_rate is not None else ""
+    if classif_norm == "cms swap":
+        if maturity_years < 5:
+            return 0.5 / 100
+        if maturity_years < 10:
+            return 0.75 / 100
+        return 0.75 / 100
+
+    if classif_norm == "real rate swap":
+        if index_norm == "HICPXT":
+            return 0.9 / 100 if maturity_years < 8 else 1.15 / 100
+        if index_norm == "FRCPIXT":
+            return 0.5 / 100 if maturity_years < 8 else 1.1 / 100
+        return None
+
+    if classif_norm == "cross currency swap":
+        if maturity_years < 5:
+            return 0.6 / 100
+        return 1.6 / 100
+
+    return None
+
 
 def apply_sensis_to_workbook(
     workbook_path: Path,
     sensis: Dict[str, SensisEntry],
     header_row: int = 6,
     sheet: str = "IRS - INF – XCCY",
+    ifts_date: date | None = None,
 ) -> Tuple[int, list[str], list[dict[str, object]]]:
     if not workbook_path.exists():
         raise FileNotFoundError(workbook_path)
@@ -234,6 +301,13 @@ def apply_sensis_to_workbook(
     updated_rows: list[dict[str, object]] = []
 
     col_notional = letter_to_index("M") + 1
+    col_classif = letter_to_index("B") + 1
+    col_index_rate = letter_to_index("I") + 1
+    col_end_date = letter_to_index("AB") + 1
+
+    ifts_dt = _coerce_to_date(ifts_date) if ifts_date is not None else None
+    if ifts_dt is None:
+        ifts_dt = _coerce_to_date(ws.cell(row=3, column=2).value)
 
     for row in range(start_row, ws.max_row + 1):
         code_cell = ws.cell(row=row, column=code_col).value
@@ -265,7 +339,18 @@ def apply_sensis_to_workbook(
             return ws.cell(row=row, column=idx).value
 
        
+        classif_value = ws.cell(row=row, column=col_classif).value
+        index_value = ws.cell(row=row, column=col_index_rate).value
+        end_value = ws.cell(row=row, column=col_end_date).value
+        maturity_years = _year_fraction(ifts_dt, _coerce_to_date(end_value))
+        threshold = _threshold_for(classif_value, index_value, maturity_years)
+        set_value("BM", threshold)
 
+        bl_value = _to_float(get_value("BL"))
+        alert = None
+        if threshold is not None and bl_value is not None and abs(bl_value) > threshold:
+            alert = "alerte"
+        set_value("BJ", alert)
         updated += 1
         updated_rows.append(
             {
@@ -275,9 +360,13 @@ def apply_sensis_to_workbook(
                 "Duration L1": entry.duration_leg1,
                 "Duration L2": entry.duration_leg2,
                 "Duration Totale": entry.duration_total,
-                "Sensis Totale": entry.sensis_total
+                "Sensis Totale": entry.sensis_total, 
+                "Maturité (années)": maturity_years,
+                "Seuil VM": threshold,
+                "Alerte": alert,
             }
         )
+
 
     wb.save(workbook_path)
     return updated, missing_codes, updated_rows

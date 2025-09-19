@@ -13,6 +13,9 @@ from trioptima_import import (
     expected_trioptima_prefix,
     load_trioptima_table,
     locate_trioptima_file,
+    apply_bndfwd_to_workbook,
+    filter_bndfwd_rows,
+    
 )
 from excel_read import label_duplicate_columns, read_xls_smart, read_xls_with_positions
 from io_zip import ensure_dir, extract_xls_from_zip
@@ -309,7 +312,7 @@ def render_workflow_tab(
                 sensis_path = locate_sensis_file(dest_dir, sensis_dt)
                 st.write(f"Fichier Sensis utilisé : **{sensis_path.name}**")
                 sensis_table = load_sensis_table(sensis_path)
-                updated, missing, rows_preview = apply_sensis_to_workbook(out_xlsm_path, sensis_table)
+                updated, missing, rows_preview = apply_sensis_to_workbook(out_xlsm_path, sensis_table,ifts_date=sensis_dt)
                 st.success(f"{updated} ligne(s) mise(s) à jour dans le template.")
                 if rows_preview:
                     df_preview = pd.DataFrame(rows_preview)
@@ -343,33 +346,106 @@ def render_workflow_tab(
                 st.write(f"Fichier TriOptima utilisé : **{triopt_path.name}**")
 
                 triopt_df = load_trioptima_table(triopt_path)
-                if triopt_df.empty:
-                    st.warning("Aucune ligne TriOptima avec FREE_TEXT_2 renseigné n'a été trouvée.")
-                    st.stop()
+
+                missing_bndfwd_cols: list[str] = triopt_df.attrs.get(
+                    "missing_bndfwd_columns", []
+                )
 
                 aggregated = aggregate_trioptima(triopt_df)
-                st.dataframe(aggregated, use_container_width=True)
+                if aggregated.empty:
+                    st.warning("Aucune ligne TriOptima avec FREE_TEXT_2 renseigné n'a été trouvée.")
+                else:
+                    st.dataframe(aggregated, use_container_width=True)
 
                 mapping = build_trioptima_mapping(aggregated)
-                updated, missing_codes, preview_rows, unused_codes = apply_trioptima_to_workbook(
-                    out_xlsm_path, mapping
-                )
-                st.success(f"{updated} ligne(s) mise(s) à jour dans le template.")
+                
+                if mapping:
+                    (
+                        updated,
+                        missing_codes,
+                        preview_rows,
+                        unused_codes,
+                    ) = apply_trioptima_to_workbook(out_xlsm_path, mapping)
+                    st.success(f"{updated} ligne(s) mise(s) à jour dans le template.")
 
-                if preview_rows:
-                    st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
+                    if preview_rows:
+                        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True)
 
-                if missing_codes:
-                    preview = ", ".join(missing_codes[:10])
-                    if len(missing_codes) > 10:
-                        preview += " …"
-                    st.warning(f"Codes DI absents du TriOptima : {preview}")
+                    if missing_codes:
+                        preview = ", ".join(missing_codes[:10])
+                        if len(missing_codes) > 10:
+                            preview += " …"
+                        st.warning(f"Codes DI absents du TriOptima : {preview}")
 
-                if unused_codes:
-                    preview = ", ".join(unused_codes[:10])
-                    if len(unused_codes) > 10:
-                        preview += " …"
-                    st.info(f"Codes TriOptima non utilisés dans le template : {preview}")
+                    if unused_codes:
+                        preview = ", ".join(unused_codes[:10])
+                        if len(unused_codes) > 10:
+                            preview += " …"
+                        st.info(f"Codes TriOptima non utilisés dans le template : {preview}")
+                else:
+                    st.info("Aucun Code DI TriOptima à injecter dans le template.")
+                
+                if missing_bndfwd_cols:
+                    cols = ", ".join(missing_bndfwd_cols)
+                    st.warning(
+                        "Colonnes TriOptima manquantes pour la feuille BND FWD : "
+                        f"{cols}"
+                    )
+                else:
+                    try:
+                        bndfwd_rows = filter_bndfwd_rows(triopt_df)
+                        
+                    except KeyError as exc:
+                        st.warning(str(exc))
+                    else:
+                        bnd_updated, bnd_missing, bnd_preview, bnd_alerts = apply_bndfwd_to_workbook(
+                            out_xlsm_path, bndfwd_rows
+                        )
+                        if bnd_updated:
+                            st.success(
+                                f"{bnd_updated} ligne(s) BND FWD mise(s) à jour dans le template."
+                            )
+                        else:
+                            st.info(
+                                "Feuille 'BND FWD' nettoyée (aucune ligne BNDFWD avec Book 601/602/603)."
+                            )
+
+                        if not bndfwd_rows.empty:
+                            preview_cols = [
+                                col
+                                for col in [
+                                    "FREE_TEXT_1",
+                                    "BOOK",
+                                    "CP",
+                                    "NOTIONAL",
+                                    "MTM_VALUE",
+                                    "MTM_DIFF",
+                                    "MTM_CONTREPARTIE",
+                                ]
+                                if col in bndfwd_rows.columns
+                            ]
+                            if preview_cols:
+                                st.dataframe(
+                                    bndfwd_rows[preview_cols].head(50),
+                                    use_container_width=True,
+                                )
+
+                        if bnd_preview:
+                            st.dataframe(pd.DataFrame(bnd_preview), use_container_width=True)
+
+                        if bnd_alerts:
+                            preview = ", ".join(bnd_alerts[:10])
+                            if len(bnd_alerts) > 10:
+                                preview += " …"
+                            st.warning(f"Seuil 0,5 % dépassé pour : {preview}")
+
+                        if bnd_missing:
+                            preview = "\n- ".join(bnd_missing[:5])
+                            if preview:
+                                preview = "- " + preview
+                            if len(bnd_missing) > 5:
+                                preview += "\n…"
+                            st.warning(f"Données manquantes BND FWD :\n{preview}")
 
                 mime = (
                     "application/vnd.ms-excel.sheet.macroEnabled.12"
